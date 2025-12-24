@@ -1,6 +1,6 @@
 /**
  * PoolPilot Alerts Service
- * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE
+ * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS
  */
 
 import express from "express";
@@ -39,7 +39,7 @@ const {
   TWILIO_AUTH,
   TWILIO_FROM,
   SMS_ENABLED,
-  SMS_OVERRIDE_TO, // 👈 NEW
+  SMS_OVERRIDE_TO, // testing mode signal
   NOTIFY_TOKEN
 } = process.env;
 
@@ -53,14 +53,27 @@ const smsEnabled = SMS_ENABLED === "true";
 // --------------------------------------------------
 // 🧠 HELPERS
 // --------------------------------------------------
-function buildMessage(alert) {
-  return `PoolPilot Alert
+function buildMessage(alert, isTestMode) {
+  let msg = `PoolPilot Alert
 ${alert.system_name}
 ${alert.alert_type}
 
-${alert.alert_summary}
+${alert.alert_summary}`;
+
+  // 👇 ONLY include manager contact info in TEST MODE
+  if (isTestMode) {
+    msg += `
+
+--- Manager Contact ---
+Phone: ${alert.alert_phone || "N/A"}
+Email: ${alert.alert_email || "N/A"}`;
+  }
+
+  msg += `
 
 Reply STOP to opt out.`;
+
+  return msg;
 }
 
 // --------------------------------------------------
@@ -80,6 +93,8 @@ app.post("/notify", async (req, res) => {
     if (token !== NOTIFY_TOKEN) {
       return res.status(401).json({ error: "unauthorized" });
     }
+
+    const isTestMode = Boolean(SMS_OVERRIDE_TO);
 
     // --------------------------------------------------
     // 🎯 SELECT ONLY VALID, ANALYZED, UNSENT ALERTS
@@ -125,12 +140,13 @@ app.post("/notify", async (req, res) => {
         continue;
       }
 
-      const body = buildMessage(alert);
+      const body = buildMessage(alert, isTestMode);
 
       if (smsEnabled) {
         console.log("📲 Sending SMS", {
           to: toNumber,
-          system: alert.system_name
+          system: alert.system_name,
+          testMode: isTestMode
         });
 
         await twilioClient.messages.create({
@@ -174,6 +190,6 @@ app.post("/notify", async (req, res) => {
 // 🚀 START SERVER
 // --------------------------------------------------
 app.listen(PORT, () => {
-  console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE");
+  console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS");
   console.log(`🚀 PoolPilot Alerts Service running on port ${PORT}`);
 });
