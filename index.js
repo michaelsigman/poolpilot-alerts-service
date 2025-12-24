@@ -5,7 +5,11 @@ import twilio from "twilio";
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
+// 🔑 SIMPLE AUTH (INTENTIONAL)
+const NOTIFY_TOKEN = "supersecretlongtoken";
+
+// 🌍 Render-required port binding
+const PORT = process.env.PORT || 3000;
 
 // ---- ENV ----
 const {
@@ -15,17 +19,17 @@ const {
   TWILIO_SID,
   TWILIO_AUTH,
   TWILIO_FROM,
-  SMS_ENABLED,
-  NOTIFY_TOKEN
+  SMS_ENABLED
 } = process.env;
 
 // ---- CLIENTS ----
 const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 
-// ---- HELPERS ----
+// ---- FLAGS ----
 const smsEnabled = SMS_ENABLED === "true";
 
+// ---- HELPERS ----
 function buildMessage(alert) {
   return `🚨 Pool Alert
 ${alert.system_name}
@@ -40,60 +44,78 @@ app.get("/health", (_, res) => {
 });
 
 app.post("/notify", async (req, res) => {
-  const { token, minutes = 30 } = req.query;
+  try {
+    const { token, minutes = 30 } = req.query;
 
-  if (token !== NOTIFY_TOKEN) {
-    return res.status(401).json({ error: "unauthorized" });
-  }
-
-  const query = `
-    SELECT *
-    FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-    WHERE alert_sent_ts IS NULL
-      AND snapshot_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @minutes MINUTE)
-    ORDER BY snapshot_ts ASC
-  `;
-
-  const [rows] = await bq.query({
-    query,
-    params: { minutes: Number(minutes) }
-  });
-
-  if (rows.length === 0) {
-    return res.json({ alerts: 0 });
-  }
-
-  let sent = 0;
-
-  for (const alert of rows) {
-    const body = buildMessage(alert);
-
-    if (smsEnabled) {
-      await twilioClient.messages.create({
-        from: TWILIO_FROM,
-        to: alert.sms_to,
-        body
-      });
+    if (token !== NOTIFY_TOKEN) {
+      return res.status(401).json({ error: "unauthorized" });
     }
 
-    sent++;
+    console.log(`🔔 /notify triggered (minutes=${minutes})`);
+
+    const query = `
+      SELECT *
+      FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+      WHERE alert_sent_ts IS NULL
+        AND snapshot_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @minutes MINUTE)
+      ORDER BY snapshot_ts ASC
+    `;
+
+    const [rows] = await bq.query({
+      query,
+      params: { minutes: Number(minutes) }
+    });
+
+    if (!rows || rows.length === 0) {
+      console.log("✅ No new alerts to send");
+      return res.json({ alerts: 0 });
+    }
+
+    let sent = 0;
+
+    for (const alert of rows) {
+      const body = buildMessage(alert);
+
+      if (smsEnabled) {
+        await twilioClient.messages.create({
+          from: TWILIO_FROM,
+          to: alert.sms_to,
+          body
+        });
+      }
+
+      sent++;
+    }
+
+    // 🧠 Mark alerts as sent (dedupe per snapshot)
+    const ids = rows.map(r => `'${r.alert_id}'`).join(",");
+
+    if (ids.length > 0) {
+      await bq.query(`
+        UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
+        SET alert_sent_ts = CURRENT_TIMESTAMP()
+        WHERE alert_id IN (${ids})
+      `);
+    }
+
+    console.log(`📤 Alerts processed: ${sent}`);
+
+    res.json({
+      alerts_sent: sent,
+      sms_sent: smsEnabled ? sent : 0,
+      dry_run: !smsEnabled
+    });
+
+  } catch (err) {
+    console.error("❌ /notify failed:", err);
+    res.status(500).json({
+      error: "internal_error",
+      message: err.message
+    });
   }
-
-  // Mark alerts as sent
-  const ids = rows.map(r => `'${r.alert_id}'`).join(",");
-  await bq.query(`
-    UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-    SET alert_sent_ts = CURRENT_TIMESTAMP()
-    WHERE alert_id IN (${ids})
-  `);
-
-  res.json({
-    alerts_sent: sent,
-    dry_run: !smsEnabled
-  });
 });
 
-// ---- START ----
+// ---- START SERVER ----
 app.listen(PORT, () => {
-  console.log(`🚀 PoolPilot Alerts running on ${PORT}`);
+  console.log(`🚀 PoolPilot Alerts listening on port ${PORT}`);
 });
