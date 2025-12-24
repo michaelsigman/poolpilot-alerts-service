@@ -5,10 +5,10 @@ import twilio from "twilio";
 const app = express();
 app.use(express.json());
 
-// 🔑 SIMPLE AUTH (INTENTIONAL)
+// 🔑 SIMPLE AUTH (INTENTIONAL FOR NOW)
 const NOTIFY_TOKEN = "supersecretlongtoken";
 
-// 🌍 Render-required port binding
+// 🌍 REQUIRED BY RENDER
 const PORT = process.env.PORT || 3000;
 
 // ---- ENV ----
@@ -19,11 +19,31 @@ const {
   TWILIO_SID,
   TWILIO_AUTH,
   TWILIO_FROM,
-  SMS_ENABLED
+  SMS_ENABLED,
+  GOOGLE_APPLICATION_CREDENTIALS_JSON
 } = process.env;
 
+// ---- VALIDATION ----
+if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  console.error("❌ Missing GOOGLE_APPLICATION_CREDENTIALS_JSON");
+  process.exit(1);
+}
+
+// ---- GOOGLE CREDS ----
+let credentials;
+try {
+  credentials = JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON);
+} catch (err) {
+  console.error("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON", err);
+  process.exit(1);
+}
+
 // ---- CLIENTS ----
-const bq = new BigQuery({ projectId: BQ_PROJECT_ID });
+const bq = new BigQuery({
+  projectId: BQ_PROJECT_ID,
+  credentials
+});
+
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 
 // ---- FLAGS ----
@@ -67,7 +87,7 @@ app.post("/notify", async (req, res) => {
     });
 
     if (!rows || rows.length === 0) {
-      console.log("✅ No new alerts to send");
+      console.log("✅ No new alerts");
       return res.json({ alerts: 0 });
     }
 
@@ -87,7 +107,7 @@ app.post("/notify", async (req, res) => {
       sent++;
     }
 
-    // 🧠 Mark alerts as sent (dedupe per snapshot)
+    // 🧠 DEDUPE: mark snapshots as notified
     const ids = rows.map(r => `'${r.alert_id}'`).join(",");
 
     if (ids.length > 0) {
@@ -107,7 +127,7 @@ app.post("/notify", async (req, res) => {
     });
 
   } catch (err) {
-    console.error("❌ /notify failed:", err);
+    console.error("❌ /notify error:", err);
     res.status(500).json({
       error: "internal_error",
       message: err.message
