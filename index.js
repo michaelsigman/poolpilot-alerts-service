@@ -1,3 +1,5 @@
+console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-COMPOSITE-KEY");
+
 import express from "express";
 import { BigQuery } from "@google-cloud/bigquery";
 import twilio from "twilio";
