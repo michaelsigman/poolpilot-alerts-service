@@ -1,6 +1,7 @@
 import express from "express";
 import { BigQuery } from "@google-cloud/bigquery";
 import twilio from "twilio";
+import fs from "fs";
 
 const app = express();
 app.use(express.json());
@@ -19,10 +20,30 @@ const {
   TWILIO_AUTH,
   TWILIO_FROM,
   SMS_ENABLED,
-  NOTIFY_TOKEN
+  NOTIFY_TOKEN,
+  GOOGLE_APPLICATION_CREDENTIALS_JSON
 } = process.env;
 
 const smsEnabled = SMS_ENABLED === "true";
+
+/* =====================================================
+   GOOGLE AUTH (Render-safe)
+   ===================================================== */
+
+if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  throw new Error("Missing GOOGLE_APPLICATION_CREDENTIALS_JSON");
+}
+
+const credentialsPath = "/tmp/gcp-key.json";
+
+if (!fs.existsSync(credentialsPath)) {
+  fs.writeFileSync(
+    credentialsPath,
+    GOOGLE_APPLICATION_CREDENTIALS_JSON
+  );
+}
+
+process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
 
 /* =====================================================
    CLIENTS
@@ -68,9 +89,6 @@ app.post("/notify", async (req, res) => {
 
     console.log("🔔 Notify run started");
 
-    /* ---------------------------------------------
-       Select unsent alerts with completed analysis
-       --------------------------------------------- */
     const query = `
       SELECT
         alert_id,
@@ -94,7 +112,6 @@ app.post("/notify", async (req, res) => {
     });
 
     if (rows.length === 0) {
-      console.log("✅ No alerts ready to send");
       return res.json({ alerts_sent: 0 });
     }
 
@@ -102,17 +119,9 @@ app.post("/notify", async (req, res) => {
     let skipped = 0;
     const sentIds = [];
 
-    /* ---------------------------------------------
-       Send alerts
-       --------------------------------------------- */
     for (const alert of rows) {
 
-      // 🚫 Skip alerts with no delivery route
       if (!alert.alert_phone && !alert.alert_email) {
-        console.log(
-          "⏭ Skipping alert — no contact info",
-          alert.system_name
-        );
         skipped++;
         continue;
       }
@@ -131,9 +140,6 @@ app.post("/notify", async (req, res) => {
       sentIds.push(alert.alert_id);
     }
 
-    /* ---------------------------------------------
-       Mark alerts as notified
-       --------------------------------------------- */
     if (sentIds.length > 0) {
       const idList = sentIds.map(id => `'${id}'`).join(",");
 
@@ -143,8 +149,6 @@ app.post("/notify", async (req, res) => {
         WHERE alert_id IN (${idList})
       `);
     }
-
-    console.log(`📤 Alerts sent: ${sent}, skipped: ${skipped}`);
 
     res.json({
       alerts_sent: sent,
