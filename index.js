@@ -2,7 +2,7 @@ import express from "express";
 import { BigQuery } from "@google-cloud/bigquery";
 import twilio from "twilio";
 
-console.log("🚀 DEPLOY VERSION: FINAL-NO-TIME-WINDOW");
+console.log("🚀 DEPLOY VERSION: FINAL-BQ-CREDS-NO-WINDOW");
 
 const app = express();
 app.use(express.json());
@@ -16,6 +16,7 @@ const {
   BQ_PROJECT_ID,
   BQ_DATASET,
   BQ_TABLE,
+  GOOGLE_APPLICATION_CREDENTIALS_JSON,
   TWILIO_SID,
   TWILIO_AUTH,
   TWILIO_FROM,
@@ -24,12 +25,27 @@ const {
 } = process.env;
 
 // ─────────────────────────────────────────────
-// CLIENTS
+// BIGQUERY CLIENT (RENDER SAFE)
 // ─────────────────────────────────────────────
+let credentials = null;
+
+if (GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  try {
+    credentials = JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON);
+  } catch (err) {
+    console.error("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON");
+    throw err;
+  }
+}
+
 const bq = new BigQuery({
-  projectId: BQ_PROJECT_ID
+  projectId: BQ_PROJECT_ID,
+  credentials
 });
 
+// ─────────────────────────────────────────────
+// TWILIO CLIENT
+// ─────────────────────────────────────────────
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 const smsEnabled = SMS_ENABLED === "true";
 
@@ -37,14 +53,16 @@ const smsEnabled = SMS_ENABLED === "true";
 // HELPERS
 // ─────────────────────────────────────────────
 function buildMessage(alert) {
+  const detectedAt = alert.snapshot_pst ?? alert.snapshot_ts;
+
   return `🚨 PoolPilot Alert
 
 Property: ${alert.system_name}
-Alert: ${alert.alert_type}
+Alert Type: ${alert.alert_type}
 
 ${alert.alert_summary}
 
-Detected: ${alert.snapshot_pst ?? alert.snapshot_ts}
+Detected: ${detectedAt}
 
 Reply or forward to schedule service.`;
 }
@@ -65,9 +83,9 @@ app.post("/notify", async (req, res) => {
     }
 
     // ─────────────────────────────────────────
-    // CORE QUERY (NO TIME WINDOW)
+    // SELECT UNSENT, READY ALERTS (NO TIME WINDOW)
     // ─────────────────────────────────────────
-    const query = `
+    const selectQuery = `
       SELECT *
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
       WHERE notified_at IS NULL
@@ -75,7 +93,7 @@ app.post("/notify", async (req, res) => {
       ORDER BY snapshot_ts ASC
     `;
 
-    const [rows] = await bq.query({ query });
+    const [rows] = await bq.query({ query: selectQuery });
 
     if (rows.length === 0) {
       return res.json({ alerts_sent: 0 });
@@ -90,13 +108,13 @@ app.post("/notify", async (req, res) => {
         continue;
       }
 
-      const body = buildMessage(alert);
+      const message = buildMessage(alert);
 
       if (smsEnabled && alert.alert_phone) {
         await twilioClient.messages.create({
           from: TWILIO_FROM,
           to: alert.alert_phone,
-          body
+          body: message
         });
       }
 
@@ -104,16 +122,16 @@ app.post("/notify", async (req, res) => {
     }
 
     // ─────────────────────────────────────────
-    // MARK AS NOTIFIED
+    // MARK ALL SENT ALERTS
     // ─────────────────────────────────────────
-    const markNotifiedQuery = `
+    const updateQuery = `
       UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
       SET notified_at = CURRENT_TIMESTAMP()
       WHERE notified_at IS NULL
         AND alert_summary IS NOT NULL
     `;
 
-    await bq.query(markNotifiedQuery);
+    await bq.query({ query: updateQuery });
 
     res.json({
       alerts_sent: sent,
