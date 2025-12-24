@@ -1,13 +1,12 @@
 /**
  * PoolPilot Alerts Service
- * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY
+ * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE
  */
 
 import express from "express";
 import { BigQuery } from "@google-cloud/bigquery";
 import twilio from "twilio";
 import fs from "fs";
-import path from "path";
 
 // --------------------------------------------------
 // 🔐 GOOGLE AUTH (Render-compatible)
@@ -40,6 +39,7 @@ const {
   TWILIO_AUTH,
   TWILIO_FROM,
   SMS_ENABLED,
+  SMS_OVERRIDE_TO, // 👈 NEW
   NOTIFY_TOKEN
 } = process.env;
 
@@ -54,13 +54,13 @@ const smsEnabled = SMS_ENABLED === "true";
 // 🧠 HELPERS
 // --------------------------------------------------
 function buildMessage(alert) {
-  return `🚨 Pool Alert
+  return `PoolPilot Alert
 ${alert.system_name}
 ${alert.alert_type}
 
 ${alert.alert_summary}
 
-Reply ACK if received.`;
+Reply STOP to opt out.`;
 }
 
 // --------------------------------------------------
@@ -84,7 +84,7 @@ app.post("/notify", async (req, res) => {
     // --------------------------------------------------
     // 🎯 SELECT ONLY VALID, ANALYZED, UNSENT ALERTS
     // --------------------------------------------------
-    const query = `
+    const selectQuery = `
       SELECT
         snapshot_ts,
         system_id,
@@ -101,7 +101,7 @@ app.post("/notify", async (req, res) => {
       ORDER BY snapshot_ts ASC
     `;
 
-    const [rows] = await bq.query({ query });
+    const [rows] = await bq.query({ query: selectQuery });
 
     if (rows.length === 0) {
       return res.json({
@@ -118,17 +118,24 @@ app.post("/notify", async (req, res) => {
     // 📤 SEND ALERTS
     // --------------------------------------------------
     for (const alert of rows) {
-      if (!alert.alert_phone && !alert.alert_email) {
+      const toNumber = SMS_OVERRIDE_TO || alert.alert_phone;
+
+      if (!toNumber) {
         skipped++;
         continue;
       }
 
       const body = buildMessage(alert);
 
-      if (smsEnabled && alert.alert_phone) {
+      if (smsEnabled) {
+        console.log("📲 Sending SMS", {
+          to: toNumber,
+          system: alert.system_name
+        });
+
         await twilioClient.messages.create({
           from: TWILIO_FROM,
-          to: alert.alert_phone,
+          to: toNumber,
           body
         });
       }
@@ -137,7 +144,7 @@ app.post("/notify", async (req, res) => {
     }
 
     // --------------------------------------------------
-    // 🧾 MARK AS NOTIFIED (COMPOSITE KEY)
+    // 🧾 MARK AS NOTIFIED
     // --------------------------------------------------
     const updateQuery = `
       UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
@@ -167,6 +174,6 @@ app.post("/notify", async (req, res) => {
 // 🚀 START SERVER
 // --------------------------------------------------
 app.listen(PORT, () => {
-  console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY");
+  console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE");
   console.log(`🚀 PoolPilot Alerts Service running on port ${PORT}`);
 });
