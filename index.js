@@ -5,13 +5,12 @@ import twilio from "twilio";
 const app = express();
 app.use(express.json());
 
-// 🔑 SIMPLE AUTH (INTENTIONAL FOR NOW)
-const NOTIFY_TOKEN = "supersecretlongtoken";
+/* =====================================================
+   CONFIG
+   ===================================================== */
 
-// 🌍 REQUIRED BY RENDER
 const PORT = process.env.PORT || 3000;
 
-// ---- ENV ----
 const {
   BQ_PROJECT_ID,
   BQ_DATASET,
@@ -20,45 +19,41 @@ const {
   TWILIO_AUTH,
   TWILIO_FROM,
   SMS_ENABLED,
-  GOOGLE_APPLICATION_CREDENTIALS_JSON
+  NOTIFY_TOKEN
 } = process.env;
 
-// ---- VALIDATION ----
-if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) {
-  console.error("❌ Missing GOOGLE_APPLICATION_CREDENTIALS_JSON");
-  process.exit(1);
-}
+const smsEnabled = SMS_ENABLED === "true";
 
-// ---- GOOGLE CREDS ----
-let credentials;
-try {
-  credentials = JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON);
-} catch (err) {
-  console.error("❌ Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON", err);
-  process.exit(1);
-}
+/* =====================================================
+   CLIENTS
+   ===================================================== */
 
-// ---- CLIENTS ----
-const bq = new BigQuery({
-  projectId: BQ_PROJECT_ID,
-  credentials
+const bigquery = new BigQuery({
+  projectId: BQ_PROJECT_ID
 });
 
 const twilioClient = twilio(TWILIO_SID, TWILIO_AUTH);
 
-// ---- FLAGS ----
-const smsEnabled = SMS_ENABLED === "true";
+/* =====================================================
+   HELPERS
+   ===================================================== */
 
-// ---- HELPERS ----
 function buildMessage(alert) {
   return `🚨 Pool Alert
 ${alert.system_name}
 ${alert.alert_type}
 
-A heater issue was detected and may require attention.`;
+${alert.alert_summary}
+
+Agency: ${alert.agency_name}
+📞 ${alert.alert_phone}
+📧 ${alert.alert_email}`;
 }
 
-// ---- ROUTES ----
+/* =====================================================
+   ROUTES
+   ===================================================== */
+
 app.get("/health", (_, res) => {
   res.json({ ok: true });
 });
@@ -71,63 +66,94 @@ app.post("/notify", async (req, res) => {
       return res.status(401).json({ error: "unauthorized" });
     }
 
-    console.log(`🔔 /notify triggered (minutes=${minutes})`);
+    console.log("🔔 Notify run started");
 
+    /* ---------------------------------------------
+       Select unsent alerts with completed analysis
+       --------------------------------------------- */
     const query = `
-      SELECT *
+      SELECT
+        alert_id,
+        snapshot_ts,
+        system_name,
+        alert_type,
+        alert_summary,
+        agency_name,
+        alert_phone,
+        alert_email
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
       WHERE notified_at IS NULL
+        AND alert_summary IS NOT NULL
         AND snapshot_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @minutes MINUTE)
       ORDER BY snapshot_ts ASC
     `;
 
-    const [rows] = await bq.query({
+    const [rows] = await bigquery.query({
       query,
       params: { minutes: Number(minutes) }
     });
 
-    if (!rows || rows.length === 0) {
-      console.log("✅ No new alerts");
-      return res.json({ alerts: 0 });
+    if (rows.length === 0) {
+      console.log("✅ No alerts ready to send");
+      return res.json({ alerts_sent: 0 });
     }
 
     let sent = 0;
+    let skipped = 0;
+    const sentIds = [];
 
+    /* ---------------------------------------------
+       Send alerts
+       --------------------------------------------- */
     for (const alert of rows) {
-      const body = buildMessage(alert);
 
-      if (smsEnabled) {
+      // 🚫 Skip alerts with no delivery route
+      if (!alert.alert_phone && !alert.alert_email) {
+        console.log(
+          "⏭ Skipping alert — no contact info",
+          alert.system_name
+        );
+        skipped++;
+        continue;
+      }
+
+      const message = buildMessage(alert);
+
+      if (smsEnabled && alert.alert_phone) {
         await twilioClient.messages.create({
           from: TWILIO_FROM,
-          to: alert.sms_to,
-          body
+          to: alert.alert_phone,
+          body: message
         });
       }
 
       sent++;
+      sentIds.push(alert.alert_id);
     }
 
-    // 🧠 DEDUPE: mark snapshots as notified
-    const ids = rows.map(r => `'${r.alert_id}'`).join(",");
+    /* ---------------------------------------------
+       Mark alerts as notified
+       --------------------------------------------- */
+    if (sentIds.length > 0) {
+      const idList = sentIds.map(id => `'${id}'`).join(",");
 
-    if (ids.length > 0) {
-      await bq.query(`
+      await bigquery.query(`
         UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
         SET notified_at = CURRENT_TIMESTAMP()
-        WHERE alert_id IN (${ids})
+        WHERE alert_id IN (${idList})
       `);
     }
 
-    console.log(`📤 Alerts processed: ${sent}`);
+    console.log(`📤 Alerts sent: ${sent}, skipped: ${skipped}`);
 
     res.json({
       alerts_sent: sent,
-      sms_sent: smsEnabled ? sent : 0,
+      alerts_skipped: skipped,
       dry_run: !smsEnabled
     });
 
   } catch (err) {
-    console.error("❌ /notify error:", err);
+    console.error("❌ Notify error", err);
     res.status(500).json({
       error: "internal_error",
       message: err.message
@@ -135,7 +161,10 @@ app.post("/notify", async (req, res) => {
   }
 });
 
-// ---- START SERVER ----
+/* =====================================================
+   START SERVER
+   ===================================================== */
+
 app.listen(PORT, () => {
-  console.log(`🚀 PoolPilot Alerts listening on port ${PORT}`);
+  console.log(`🚀 PoolPilot Alerts Service running on port ${PORT}`);
 });
