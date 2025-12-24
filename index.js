@@ -37,10 +37,7 @@ if (!GOOGLE_APPLICATION_CREDENTIALS_JSON) {
 const credentialsPath = "/tmp/gcp-key.json";
 
 if (!fs.existsSync(credentialsPath)) {
-  fs.writeFileSync(
-    credentialsPath,
-    GOOGLE_APPLICATION_CREDENTIALS_JSON
-  );
+  fs.writeFileSync(credentialsPath, GOOGLE_APPLICATION_CREDENTIALS_JSON);
 }
 
 process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
@@ -89,9 +86,12 @@ app.post("/notify", async (req, res) => {
 
     console.log("🔔 Notify run started");
 
-    const query = `
+    /* ---------------------------------------------
+       Select unsent, analyzed alerts
+       --------------------------------------------- */
+    const selectQuery = `
       SELECT
-        alert_id,
+        system_id,
         snapshot_ts,
         system_name,
         alert_type,
@@ -107,20 +107,25 @@ app.post("/notify", async (req, res) => {
     `;
 
     const [rows] = await bigquery.query({
-      query,
+      query: selectQuery,
       params: { minutes: Number(minutes) }
     });
 
     if (rows.length === 0) {
+      console.log("✅ No alerts ready to send");
       return res.json({ alerts_sent: 0 });
     }
 
     let sent = 0;
     let skipped = 0;
-    const sentIds = [];
+    const keys = [];
 
+    /* ---------------------------------------------
+       Send alerts
+       --------------------------------------------- */
     for (const alert of rows) {
 
+      // Skip alerts with no delivery route
       if (!alert.alert_phone && !alert.alert_email) {
         skipped++;
         continue;
@@ -137,18 +142,33 @@ app.post("/notify", async (req, res) => {
       }
 
       sent++;
-      sentIds.push(alert.alert_id);
+      keys.push({
+        system_id: alert.system_id,
+        snapshot_ts: alert.snapshot_ts,
+        alert_type: alert.alert_type
+      });
     }
 
-    if (sentIds.length > 0) {
-      const idList = sentIds.map(id => `'${id}'`).join(",");
+    /* ---------------------------------------------
+       Mark alerts as notified (composite key)
+       --------------------------------------------- */
+    if (keys.length > 0) {
+      const conditions = keys.map(k =>
+        `(system_id = '${k.system_id}'
+          AND snapshot_ts = TIMESTAMP('${k.snapshot_ts}')
+          AND alert_type = '${k.alert_type}')`
+      ).join(" OR ");
 
-      await bigquery.query(`
+      const updateQuery = `
         UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
         SET notified_at = CURRENT_TIMESTAMP()
-        WHERE alert_id IN (${idList})
-      `);
+        WHERE ${conditions}
+      `;
+
+      await bigquery.query(updateQuery);
     }
+
+    console.log(`📤 Alerts sent: ${sent}, skipped: ${skipped}`);
 
     res.json({
       alerts_sent: sent,
