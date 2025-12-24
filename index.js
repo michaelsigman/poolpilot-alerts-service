@@ -1,6 +1,6 @@
 /**
  * PoolPilot Alerts Service
- * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS
+ * DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS-AGENCY
  */
 
 import express from "express";
@@ -60,9 +60,12 @@ ${alert.alert_type}
 
 ${alert.alert_summary}`;
 
-  // 👇 ONLY include manager contact info in TEST MODE
+  // 👇 ONLY include agency + contact info in TEST MODE
   if (isTestMode) {
     msg += `
+
+--- Agency ---
+${alert.agency_name || "Unknown Agency"}
 
 --- Manager Contact ---
 Phone: ${alert.alert_phone || "N/A"}
@@ -108,6 +111,7 @@ app.post("/notify", async (req, res) => {
         alert_summary,
         alert_phone,
         alert_email,
+        agency_name,
         classification
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
       WHERE notified_at IS NULL
@@ -146,6 +150,7 @@ app.post("/notify", async (req, res) => {
         console.log("📲 Sending SMS", {
           to: toNumber,
           system: alert.system_name,
+          agency: alert.agency_name || "unknown",
           testMode: isTestMode
         });
 
@@ -190,6 +195,8 @@ app.post("/notify", async (req, res) => {
 // 🚀 START SERVER
 // --------------------------------------------------
 app.listen(PORT, () => {
-  console.log("🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS");
+  console.log(
+    "🚀 DEPLOY VERSION: 2025-01-ALERTS-VALID-ONLY-SMS-OVERRIDE-CONTACTS-AGENCY"
+  );
   console.log(`🚀 PoolPilot Alerts Service running on port ${PORT}`);
 });
