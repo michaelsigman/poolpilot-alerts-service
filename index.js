@@ -76,7 +76,7 @@ app.post("/notify", async (req, res) => {
     const query = `
       SELECT *
       FROM \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-      WHERE alert_sent_ts IS NULL
+      WHERE notified_at IS NULL
         AND snapshot_ts >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @minutes MINUTE)
       ORDER BY snapshot_ts ASC
     `;
@@ -113,7 +113,7 @@ app.post("/notify", async (req, res) => {
     if (ids.length > 0) {
       await bq.query(`
         UPDATE \`${BQ_PROJECT_ID}.${BQ_DATASET}.${BQ_TABLE}\`
-        SET alert_sent_ts = CURRENT_TIMESTAMP()
+        SET notified_at = CURRENT_TIMESTAMP()
         WHERE alert_id IN (${ids})
       `);
     }
